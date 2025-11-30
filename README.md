@@ -130,12 +130,12 @@ This makes the final policy **PMP-guided for optimality** while being **Lyapunov
   - High-dimensional covariance matrix generation  
   - Lyapunov critic integrated analogously to single-asset case.
 
-- 🚧 Experiments & diagnostics  
+- ☐ Experiments & diagnostics  
   - Systematic sweeps over \(\gamma, T, d\)  
   - Sensitivity to Lyapunov weights (\(\alpha,\beta,\lambda_{\text{lyap}}\))  
   - Comparison with unconstrained Merton portfolios.
 
-- 🔮 Planned extensions  
+- ☐ Planned extensions  
   - CVaR-based safety costs  
   - Regime-switching / stochastic interest rate models  
   - Transaction costs and no-trade regions.
@@ -144,65 +144,44 @@ This makes the final policy **PMP-guided for optimality** while being **Lyapunov
 
 ## Installation
 
-# Clone
+```bash
 git clone https://github.com/your-username/deep-lyapunov-critics-finrl.git
 cd deep-lyapunov-critics-finrl
-
-# Install dependencies (edit as needed)
 pip install -r requirements.txt
----
+```
 
-# Usage
-# 1. Single-asset PG-DPO with Lyapunov safety
+## Usage
+
+Run the main script for either the single-asset or multi-asset setting:
+
+```bash
 python deep_lyapunov_merton.py --mode single --iters 2000
-
-- This runs:
-
-  - PMP-guided PG-DPO for the single-asset Merton problem,
-
-  - Lyapunov critic with wealth barrier and ruin penalty,
-
-  - contour plots of
-    - learned \pi(t, W) vs analytic \pi^*
-    - learned c(t, W) vs analytic c^*(t, W).
-  - Outputs (figures, logs) are written under outputs_pgdpo/
-# 2. Multi-asset Projected PG-DPO with Lyapunov safety
 python deep_lyapunov_merton.py --mode multi --d 64 --iters 2000
+```
 
-This launches the multi-asset experiment:
+Key configuration knobs (edit in the script or via CLI flags): horizon \(T\), risk aversion \(\gamma\), discount \(\delta\),
+Lyapunov weights \(\alpha, \beta, \lambda_{\text{lyap}}\), and projection choices.
 
-  - long-only, fully invested portfolio via simplex projection,
+## Repository Structure
 
-  - PMP-guided updates using the multi-asset Hamiltonian,
+```
+deep_lyapunov_merton.py     # Main entry point (single & multi-asset PG-DPO + Lyapunov)
+models/
+  policy.py                 # PolicyNet definitions (single / multi)
+  value.py                  # ValueNet (critic for PG-DPO)
+  lyapunov.py               # LyapunovNet architectures
+algos/
+  pgdpo_single.py           # Single-asset PG-DPO training loop
+  pgdpo_multi.py            # Multi-asset PG-DPO training loop (projection)
+  projection.py             # FastSimplexProjection and other operators
+utils/
+  grids.py                  # Time/wealth grid generation
+  merton_analytic.py        # Closed-form Merton solution (pi*, kappa*)
+  plotting.py               # Contour & diagnostic plotting
+outputs_pgdpo/              # Saved figures / logs
+```
 
-  - Lyapunov critic and ruin penalty defined on total wealth,
+## Citation & Contact
 
-  - contour plots for selected coordinates of π(t,W) and the consumption ratio.
-
-    
-# Config tweaks
-Key hyperparameters (either in the config class or via CLI flags):
-  - gamma : risk aversion,
-  - T : horizon,
-  - W_safe, W_ruin : safety / ruin threshholds
-  - lambda_lyap_td, lambda_lyap_drift, lambda_ruin : safety loss weights,
-  - d : number of assets in the multi-asset experiment.
-
-# Repo Structure
-├─ deep_lyapunov_merton.py     # Main script (single & multi asset PG-DPO + Lyapunov)
-├─ models/
-│  ├─ policy.py                # PolicyNet definitions (single / multi)
-│  ├─ value.py                 # ValueNet (critic for PG-DPO)
-│  └─ lyapunov.py              # LyapunovNet architectures
-├─ algos/
-│  ├─ pgdpo_single.py          # Single-asset PG-DPO training loop
-│  ├─ pgdpo_multi.py           # Multi-asset PG-DPO training loop (projection)
-│  └─ projection.py            # FastSimplexProjection and other operators
-├─ utils/
-│  ├─ grids.py                 # Time/wealth grid generation
-│  ├─ merton_analytic.py       # Closed-form Merton solution (pi*, kappa*)
-│  └─ plotting.py              # Contour & diagnostic plotting
-└─ outputs_pgdpo/              # Saved figures / logs
-
-If you use this code or ideas in academic work, please consider citing or mentioning this repository.
-For questions or collaboration, feel free to contact: chln0124@skku.edu.
+If you use this code or ideas in academic work, please cite or mention this repository.
+For questions or collaboration, contact chln0124@skku.edu.
