@@ -3,6 +3,7 @@
 ![status](https://img.shields.io/badge/status-work%20in%20progress-yellow)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
+
 This repository contains a single end-to-end experiment script that trains **Pontryagin-guided direct policy optimization (PG-DPO)** agents with **Lyapunov-style safety constraints** in a continuous-time Merton-style market. The current code focuses on a **multi-asset** setting with projection to the simplex for long-only, fully-invested portfolios.
 
 ---
