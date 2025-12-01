@@ -223,7 +223,6 @@ outputs_pgdpo/              # Saved figures / logs
 ```
 ---
 
-## Citation & Contact
 ## Citation & contact
 
 If you build on this code or its ideas, please cite or mention the repository. For questions or collaboration, contact chln0124@skku.edu.
