@@ -143,10 +143,7 @@ pip install torch numpy matplotlib
   - ruin penalty \(\mathbb{E}[s(W_{k+1})]\).
 
 This makes the final policy **PMP-guided for optimality** while being **Lyapunov-guided for safety**.
-## Running the experiment
 
----
-Execute the main script directly:
 
 ## Status & Roadmap
 ```bash
