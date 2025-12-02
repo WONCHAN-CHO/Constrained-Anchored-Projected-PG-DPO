@@ -1,4 +1,4 @@
-# Deep Lyapunov Critics for Safe Financial Reinforcement Learning
+# Constrained-Anchored-Projected-PG-DPO
 
 ![status](https://img.shields.io/badge/status-work%20in%20progress-yellow)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
