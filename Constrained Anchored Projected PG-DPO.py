@@ -22,8 +22,9 @@ class CFG:
 
 
 cfg = CFG()
-
+# ---------------------------------------------------------------------
 #  Model / training configuration
+# ---------------------------------------------------------------------
 cfg.d = 3
 cfg.T = 5.0
 cfg.dt = 0.05
@@ -34,6 +35,8 @@ cfg.delta = 0.03
 cfg.beta = 1.0
 
 cfg.r = 0.02
+
+cfg.device = DEVICE  
 
 mu_vals = np.linspace(0.08, 0.16, cfg.d).astype(np.float32)
 cfg.mu = torch.tensor(mu_vals, device=DEVICE, dtype=torch.float32)
@@ -63,6 +66,18 @@ cfg.lr_lambda = 0.05
 
 cfg.c_max_ratio = 0.8
 
+cfg.ruin_tol = cfg.eps_ruin   
+cfg.risk_budget = 0.25        
+cfg.cons_floor = 0.05         
+cfg.c_ratio_theory = 0.2      
+
+cfg.cons_floor_factor = 0.8     
+cfg.risk_budget_factor = 1.0     
+cfg.eps_ruin = 0.10              
+cfg.delta_perf = 0.00            
+cfg.lambda_dev = 1e-3
+cfg.lr_lambda = 0.05
+
 # PMP / HJB penalty weights
 cfg.alpha_pmp = 1e-2
 cfg.alpha_hjb = 1e-3
@@ -71,6 +86,68 @@ cfg.plot_folder = "./plots_full_safe_ppgdpo"
 os.makedirs(cfg.plot_folder, exist_ok=True)
 
 
+def as_device_tensor(x, device):
+    if isinstance(x, torch.Tensor):
+        return x.to(device=device, dtype=torch.float32)
+    return torch.as_tensor(x, dtype=torch.float32, device=device)
+
+def analytic_merton_pi(cfg):
+    device = cfg.device
+    Sigma = as_device_tensor(cfg.Sigma, device)
+    mu = as_device_tensor(cfg.mu, device).view(-1)
+    ones = torch.ones_like(mu)
+    mu_excess = mu - cfg.r * ones
+    Sigma_inv = torch.inverse(Sigma)
+    pi_star = (1.0 / cfg.gamma) * (Sigma_inv @ mu_excess)
+    return pi_star
+
+def analytic_consumption_ratio(cfg, t_tensor):
+    k_const = getattr(cfg, "c_ratio_theory", 0.2)  # 기본값 0.2
+    return k_const * torch.ones_like(t_tensor)
+
+def compare_policy_with_merton_1d(policy, cfg, w_fixed=1.0, n_t=200, prefix="Baseline"):
+    device = cfg.device
+    T = cfg.T
+
+    t_grid = torch.linspace(0.0, T, n_t, device=device).view(-1, 1)
+    w_grid = torch.full_like(t_grid, float(w_fixed))
+
+    with torch.no_grad():
+        out = policy(t_grid, w_grid)
+        c_pred = out[0]
+        pi_pred = out[1]
+
+    c_pred = c_pred.view(-1).cpu().numpy()
+    pi_pred = pi_pred.cpu().numpy()
+    t_np = t_grid.view(-1).cpu().numpy()
+
+    pi_star = analytic_merton_pi(cfg).cpu().numpy()
+    k_theory = analytic_consumption_ratio(cfg, t_grid).view(-1).cpu().numpy()
+    c_theory = k_theory * float(w_fixed)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(t_np, c_pred, label=f"{prefix} learned c(t,{w_fixed})")
+    plt.plot(t_np, c_theory, "--", label="Merton theory c(t,w)", linewidth=2)
+    plt.xlabel("t")
+    plt.ylabel("consumption")
+    plt.title(f"{prefix}: c(t, w={w_fixed}) vs Merton")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    d = cfg.d
+    for j in range(d):
+        plt.figure(figsize=(6, 4))
+        plt.plot(t_np, pi_pred[:, j], label=f"{prefix} learned pi_{j}(t,{w_fixed})")
+        plt.axhline(pi_star[j], color="k", linestyle="--",
+                    label=f"Merton pi_*[{j}]")
+        plt.xlabel("t")
+        plt.ylabel(f"pi_{j}(t,w={w_fixed})")
+        plt.title(f"{prefix}: pi_{j}(t, w={w_fixed}) vs Merton")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        
 #  Utilities
 def utility_crra(c, gamma):
     eps = 1e-8
@@ -206,6 +283,116 @@ class CriticV(nn.Module):
         return self.head(h)
 
 
+def mc_evaluate_policy(policy, cfg, n_paths=8192, n_steps=200, name="Policy"):
+    device = DEVICE
+    T = cfg.T
+    dt = T / n_steps
+    sqrt_dt = math.sqrt(dt)
+    d = cfg.d
+    W0 = cfg.W0
+
+    mu = cfg.mu.view(-1).to(device)
+    Sigma = cfg.Sigma.to(device)
+    L_chol = torch.linalg.cholesky(Sigma + 1e-8 * torch.eye(d, device=device))
+    ones = torch.ones_like(mu)
+
+    t = torch.zeros(n_paths, 1, device=device)
+    W = torch.full((n_paths, 1), float(W0), device=device)
+
+    W_path_min = W.clone()
+    ruin_flag = torch.zeros(n_paths, 1, dtype=torch.bool, device=device)
+    cons_sum = torch.zeros(n_paths, 1, device=device)
+
+    for _ in range(n_steps):
+        with torch.no_grad():
+            out = policy(t, W)
+            if isinstance(out, (tuple, list)):
+                c_t, pi_t = out[0], out[1]
+            else:
+                raise ValueError("policy(t, W)는 (c, pi, ...) 튜플을 반환해야 합니다.")
+
+        mu_excess = (mu - cfg.r * ones).view(1, -1)
+        drift_part = (cfg.r + (pi_t * mu_excess).sum(dim=1, keepdim=True)) * W - c_t
+
+        z = torch.randn(n_paths, d, device=device)
+        dB = z @ L_chol.T * sqrt_dt
+        diff_part = W * (pi_t * dB).sum(dim=1, keepdim=True)
+
+        W = W + drift_part * dt + diff_part
+        W = torch.clamp(W, min=0.0)
+
+        W_path_min = torch.minimum(W_path_min, W)
+        ruin_flag |= (W <= 1e-6)
+
+        cons_sum += torch.clamp(c_t, min=0.0) * dt
+        t = t + dt
+
+    W_final = W.view(-1)
+    ruin_prob = ruin_flag.float().mean().item()
+
+    ret = (W_final / W0 - 1.0).cpu().numpy()
+    avg_ret = float(ret.mean())
+    std_ret = float(ret.std() + 1e-12)
+    sharpe = (avg_ret - 0.0) / std_ret
+
+    mdd_arr = 1.0 - (W_final / W_path_min.view(-1)).cpu().numpy()
+    max_drawdown = float(mdd_arr.max())
+
+    alpha = 0.01
+    sorted_ret = np.sort(ret)
+    idx = max(1, int(alpha * len(sorted_ret)))
+    var_alpha = float(sorted_ret[idx - 1])
+    cvar_alpha = float(sorted_ret[:idx].mean())
+
+    cons_ratio = (cons_sum.view(-1) / (T * W0)).cpu().numpy()
+    avg_cons_ratio = float(cons_ratio.mean())
+
+    metrics = {
+        "ruin_prob": ruin_prob,
+        "avg_return": avg_ret,
+        "std_return": std_ret,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "VaR_alpha": var_alpha,
+        "CVaR_alpha": cvar_alpha,
+        "avg_cons_ratio": avg_cons_ratio,
+    }
+
+    print(f"\n[MC Evaluation: {name}]")
+    for k, v in metrics.items():
+        print(f"  {k:>16s} : {v: .6f}")
+
+    return metrics
+
+
+def constraint_slacks_from_metrics(metrics, cfg):
+    ruin_prob = metrics["ruin_prob"]
+    risk_proxy = metrics["std_return"]
+    cons_ratio = metrics["avg_cons_ratio"]
+
+    ruin_tol = getattr(cfg, "ruin_tol", cfg.eps_ruin)
+    risk_budget = getattr(cfg, "risk_budget", 0.25)
+    cons_floor = getattr(cfg, "cons_floor", 0.05)
+
+    g_r = ruin_prob - ruin_tol
+    g_p = risk_proxy - risk_budget
+    g_c = cons_floor - cons_ratio
+
+    return g_r, g_p, g_c
+
+
+
+def report_policy_with_constraints(policy, cfg, name="Policy",
+                                   n_paths=8192, n_steps=200):
+    metrics = mc_evaluate_policy(policy, cfg, n_paths=n_paths,
+                                 n_steps=n_steps, name=name)
+    g_r, g_p, g_c = constraint_slacks_from_metrics(metrics, cfg)
+    print(f"[Constraint Slacks: {name}]")
+    print(f"  g_r = ruin_prob - ruin_tol      = {g_r: .6e}")
+    print(f"  g_p = risk_proxy - risk_budget  = {g_p: .6e}")
+    print(f"  g_c = cons_floor - cons_ratio   = {g_c: .6e}")
+    return metrics, (g_r, g_p, g_c)
+
 #  Rollout with pathwise gradient
 def rollout_pg(policy_fn, cfg, batch_size, collect_base=False):
     d = cfg.d
@@ -300,7 +487,7 @@ def rollout_pg(policy_fn, cfg, batch_size, collect_base=False):
         return J_total, ruin_prob, avg_risk, cons_tensor, t_traj, w_traj, c_traj, pi_traj
 
 
-#  PMP + HJB residuals (fixed graph bug)
+#  PMP + HJB residuals
 def compute_pmp_hjb_residuals(critic, t_traj, w_traj, c_traj, pi_traj, cfg, num_samples=2048):
     steps, B, _ = t_traj.shape
     d = cfg.d
@@ -423,13 +610,24 @@ def train_baseline_ppgdpo_multi():
             c_traj,
             pi_traj,
         ) = rollout_pg(pol_eval, cfg, 4096, collect_base=False)
+
         J0 = J_total.mean().item()
         ruin0 = ruin_prob.item()
         risk0 = avg_risk.item()
-    print(f"[Baseline] Final: J0={J0:+.4e}, ruin={ruin0:.4f}, risk={risk0:.4f}")
+
+        cons_sum = cons_tensor.sum(dim=0) * cfg.dt
+        avg_cons_ratio = (cons_sum / (cfg.T * cfg.W0)).mean().item()
+
+    cfg.ruin_tol = cfg.eps_ruin
+    cfg.cons_floor = cfg.cons_floor_factor * avg_cons_ratio
+    cfg.risk_budget = cfg.risk_budget_factor * risk0
+
+    print(
+        f"[Baseline] Final: J0={J0:+.4e}, ruin={ruin0:.4f}, "
+        f"risk={risk0:.4f}, avg_cons_ratio={avg_cons_ratio:.4f}"
+    )
 
     return policy, critic, J0
-
 
 #  Stage 1: Anchored constrained PG-DPO
 def train_anchored_constrained_ppgdpo(base_policy, critic, baseline_J0):
@@ -464,12 +662,13 @@ def train_anchored_constrained_ppgdpo(base_policy, critic, baseline_J0):
 
         L_pmp, L_hjb = compute_pmp_hjb_residuals(critic, t_traj, w_traj, c_traj, pi_traj, cfg)
 
-        g_ruin = ruin_prob - cfg.eps_ruin
+        cons_sum = cons_tensor.sum(dim=0) * cfg.dt
+        avg_cons_ratio = (cons_sum / (cfg.T * cfg.W0)).mean()
+
+        g_ruin = ruin_prob - cfg.ruin_tol
         g_perf = baseline_J0 - J_mean - cfg.delta_perf
-        cons_diff = (cons_tensor - base_cons_tensor) ** 2
-        cons_dev = cons_diff.mean()
-        g_cons = cons_dev - cfg.eps_cons
-        g_risk = avg_risk - 0.5 * cfg.d
+        g_cons = cfg.cons_floor - avg_cons_ratio
+        g_risk = avg_risk - cfg.risk_budget
 
         dev_penalty = 0.0
         for p in res_policy.parameters():
@@ -511,14 +710,15 @@ def train_anchored_constrained_ppgdpo(base_policy, critic, baseline_J0):
 
         if (it + 1) % 300 == 0:
             print(
-                f"[Anchored] it={it+1:4d}  J={J_mean.item():+.4e}  ruin={ruin_prob.item():.4f}  "
-                f"risk={avg_risk.item():.4f}  g_r={g_ruin.item():+.3e}  "
-                f"g_p={g_perf.item():+.3e}  g_c={g_cons.item():+.3e}  "
-                f"L_pmp={L_pmp.item():.3e}  L_hjb={L_hjb.item():.3e}"
+                f"[Anchored] it={it+1:4d}  J={J_mean.item():+.4e}  "
+                f"ruin={ruin_prob.item():.4f}  risk={avg_risk.item():.4f}  "
+                f"g_r={g_ruin.item():+.3e}  g_p={g_perf.item():+.3e}  "
+                f"g_c={g_cons.item():+.3e}  g_risk={g_risk.item():+.3e}  "
+                f"L_pmp={L_pmp.item():.3e}  L_hjb={L_hjb.item():.3e}  "
+                f"avg_c_ratio={avg_cons_ratio.item():.3f}"
             )
 
     return anchored_policy
-
 
 #  Visualization
 def contour_policy_c_pi(policy_fn, title_prefix):
@@ -556,24 +756,35 @@ def contour_policy_c_pi(policy_fn, title_prefix):
         fig.savefig(os.path.join(cfg.plot_folder, f"{title_prefix}_pi{j}.png"), dpi=150)
         plt.close(fig)
 
-
+    
 #  Main
 def main():
     print("Configuration Loaded. Mode: Full Safe Projected PG-DPO (Anchored)")
+
     print("Stage 0: Baseline Projected PG-DPO (unconstrained)")
     base_policy, critic, J0 = train_baseline_ppgdpo_multi()
 
     print("\nStage 1: Anchored constrained PG-DPO (CA-P-PGDPO)")
-    anchored_policy = train_anchored_constrained_ppgdpo(base_policy, critic, J0)
+    safe_policy = train_anchored_constrained_ppgdpo(base_policy, critic, J0)
 
-    print("\nPlotting baseline policy surfaces...")
-    contour_policy_c_pi(lambda t, w: base_policy(t, w), "Baseline_PPGDPO")
+    # 2D surface plot
+    contour_policy_c_pi(base_policy, "Baseline_PPGDPO")
+    contour_policy_c_pi(safe_policy, "CA_PPGDPO_safe")
 
-    print("Plotting anchored constrained policy surfaces...")
-    contour_policy_c_pi(lambda t, w: anchored_policy(t, w), "CA_PPGDPO_safe")
+    # 이론 Merton 비교
+    compare_policy_with_merton_1d(base_policy, cfg, w_fixed=1.0,
+                                  n_t=200, prefix="Baseline_PPGDPO")
+    compare_policy_with_merton_1d(safe_policy, cfg, w_fixed=1.0,
+                                  n_t=200, prefix="CA_PPGDPO_safe")
 
-    print("finished")
+    # Monte Carlo risk + 제약 slack 리포트
+    report_policy_with_constraints(base_policy, cfg, name="Baseline_PPGDPO",
+                                   n_paths=4096, n_steps=200)
+    report_policy_with_constraints(safe_policy, cfg, name="CA_PPGDPO_safe",
+                                   n_paths=4096, n_steps=200)
 
 
 if __name__ == "__main__":
     main()
+
+
